@@ -13,6 +13,7 @@ BROKER = "broker.hivemq.com"
 PORT = 1883
 TOPIC = "plant_monitor/sensor_01/telemetry"
 DB_NAME = "plant_data.db"
+COMMAND_TOPIC = "plant_monitor/commands"
 
 # --- DATABASE SETUP ---
 def init_db():
@@ -30,7 +31,7 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
-    print("📂 Database initialized.")
+    print("Database initialized 🗄️...")
 
 def save_to_db(data):
     """Logs clean data to SQLite."""
@@ -42,7 +43,7 @@ def save_to_db(data):
     ''', (datetime.fromtimestamp(data['timestamp']), data['moisture'], data['temperature'], data['humidity']))
     conn.commit()
     conn.close()
-    print("💾 Data saved to Storage.")
+    print("Sensor Reading Logged to Database Successfully 📝")
 
 def export_to_csv():
     """
@@ -50,7 +51,7 @@ def export_to_csv():
     for use in Excel/Google Sheets.
     """
     try:
-        print("💾 Exporting database to CSV...")
+        print("Exporting sensor_logs to CSV 📑...")
         conn = sqlite3.connect(DB_NAME)
         
         # Use Pandas to grab the whole table in one line
@@ -59,9 +60,9 @@ def export_to_csv():
         
         if not df.empty:
             # Create a filename with the current timestamp so you don't overwrite old ones
-            filename = f"plant_data_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            filename = f"plant_data.csv"
             df.to_csv(filename, index=False)
-            print(f"✅ Success! Data saved to: {filename}")
+            print(f"Success! Data saved to: {filename} ✅")
         else:
             print("⚠️ Database is empty. No CSV created.")
 
@@ -100,53 +101,62 @@ def run_ai_prediction():
         # Predict time until 30%
         # 30 = slope * X + intercept  =>  X = (30 - intercept) / slope
         if slope < 0: # Only predict if drying
-            seconds_until_critical = (30.0 - intercept) / slope
+            seconds_until_critical = (25.0 - intercept) / slope
             if seconds_until_critical > 0:
                 predicted_time = now + timedelta(seconds=seconds_until_critical)
-                print(f"🔮 AI FORECAST: Water needed at {predicted_time.strftime('%H:%M:%S')}")
+                print(f"Predicted Time for the Next Watering is: {predicted_time.strftime('%H:%M:%S')} 🕒...")
             
     except Exception as e:
         print(f"AI Error: {e}")
 
 
 # --- ACTION LAYER ---
-def trigger_alert(moisture):
-    """
-    Simulates the Twilio SMS / Water Pump activation.
-    """
-    print("\n🚨 CRITICAL ALERT 🚨")
-    print(f"   Moisture Level: {moisture}% (BELOW 30%)")
-    print("   -> 📲 SMS Sent: 'Water your plant!'")
-    print("   -> 💧 Water Pump ACTIVATED")
-    print("-" * 30 + "\n")
+# State variable to prevent spamming the "Warning" SMS
+warning_sent = False
+def trigger_alert(client, moisture):
+    global warning_sent
+    
+    # CASE 1: CRITICAL (< 25%) -> AUTO ACTION
+    if moisture < 25.0:
+        print("\nCRITICAL LEVEL (< 25%) REACHED! 🚨")
+        print("System Taking Control: Auto-Activating Pump...")
+        
+        # Publish command back to the Sensor (and Mobile App)
+        client.publish(COMMAND_TOPIC, "WATER_ON")
+        
+        warning_sent = False # Reset state
+        print("'WATER_ON' command sent.\n")
+
+    # CASE 2: WARNING (< 30%) -> USER REMINDER
+    elif moisture < 30.0:
+        if not warning_sent:
+            print("\nALERT: Moisture is low (< 30%)⚠️ .")
+            print("Notification sent: 'Please turn on pump via App'.")
+            print("Waiting for user action ⏳...")
+            warning_sent = True # Mark as sent so we don't spam
+            
+    # CASE 3: HEALTHY (> 30%)
+    else:
+        # Reset the warning flag if plant becomes healthy again
+        if warning_sent:
+            warning_sent = False
 
 # --- PROCESSING LAYER ---
-message_counter = 0
 def process_data(client, userdata, message):
-    global message_counter
     try:
         payload = message.payload.decode("utf-8")
         data = json.loads(payload)
-        
-        print(f"📥 Received raw data: {data}")
 
         # 1. Cleaning Step (Filter out sensor noise)
         if data['moisture'] < 0:
-            print("⚠️ Invalid reading detected (Sensor Noise). Discarding.")
+            print("Invalid reading detected (Sensor Noise). Discarding ⚠️ .")
             return
 
         # 2. Storage Step
         save_to_db(data)
 
-        # 3. AI Step (Run every 5 messages to save CPU)
-        message_counter += 1
-        if message_counter % 5 == 0:
-            print("🧠 Running Health Analysis...")
-            run_ai_prediction()
-
-        # 3. Reaction Step
-        if data['moisture'] < 30.0:
-            trigger_alert(data['moisture'])
+        # CHECK LOGIC
+        trigger_alert(client, data['moisture'])
 
     except Exception as e:
         print(f"Error processing message: {e}")

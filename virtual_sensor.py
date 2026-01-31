@@ -3,69 +3,62 @@ import json
 import random
 import paho.mqtt.client as mqtt
 
-# --- CONFIGURATION ---
 BROKER = "broker.hivemq.com"
 PORT = 1883
 TOPIC = "plant_monitor/sensor_01/telemetry"
-CLIENT_ID = f"python-sensor-{random.randint(0, 1000)}"
+COMMAND_TOPIC = "plant_monitor/commands"
 
-# Global variable to track moisture state
-current_moisture = 80.0 
+# Global Moisture State
+current_moisture = 80.0
 
-# --- VIRTUAL SENSORS ---
-def get_sensor_data():
+# --- LISTENER FUNCTION ---
+def on_command(client, userdata, message):
     global current_moisture
+    command = message.payload.decode("utf-8")
     
-    # 1. Simulate Natural Drying
-    # Lose between 0.5% and 1.5% moisture every reading
-    drying_rate = random.uniform(0.5, 1.5)
-    current_moisture -= drying_rate
-
-    # 2. Simulate "Watering" if it gets too dry (Automatic Reset)
-    if current_moisture < 25.0:
-        print("💧 Plant watered! Moisture resetting...")
-        current_moisture = 85.0
-
-    # 3. Add a tiny bit of random noise (sensors aren't perfect)
-    sensor_noise = random.uniform(-0.5, 0.5)
-    
-    return {
-        "moisture": round(current_moisture + sensor_noise, 2),
-        "temperature": round(random.uniform(20.0, 35.0), 2),
-        "humidity": round(random.uniform(30.0, 60.0), 2),
-        "timestamp": time.time()
-    }
+    if command == "WATER_ON":
+        print("\nPUMP ACTIVATED: Watering Plant...")
+        time.sleep(1) # Simulate pump running
+        current_moisture = 85.0 # Reset moisture
+        print("Soil is wet. Moisture reset to 85%.\n")
 
 def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        print(f"Connection Successful! ✅\n")
-    else:
-        print(f"❌ Failed to connect, return code {rc}")
+    print(" Connected! Listening for sensor data AND commands...")
+    # Subscribe to the command topic to hear the pump signal
+    client.subscribe(COMMAND_TOPIC)
+
+# Change this:
+# client = mqtt.Client("python-sensor-node")
+
+# To this:
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, "python-sensor-node")
+client.on_connect = on_connect
+client.on_message = on_command # Attach the command listener
+
+client.connect(BROKER, PORT)
+client.loop_start() # Run background thread to listen for commands
 
 # --- MAIN LOOP ---
-# Add the CallbackAPIVersion argument as the first parameter
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id=CLIENT_ID)
-client.on_connect = on_connect
-
-print("Connecting to broker ⏳ ...\n")
-client.connect(BROKER, PORT)
-client.loop_start()
-
 try:
     while True:
-        # 1. Generation
-        payload = get_sensor_data()
+        # 1. Simulate Drying (No auto-reset here anymore!)
+        drying_rate = random.uniform(0.5, 1.5)
+        current_moisture -= drying_rate
         
-        # 2. Transmission
-        json_payload = json.dumps(payload)
-        client.publish(TOPIC, json_payload)
+        # Cap moisture at 0 so it doesn't go negative naturally
+        if current_moisture < 0: current_moisture = 0
+
+        # 2. Publish Data
+        payload = {
+            "moisture": round(current_moisture, 2),
+            "temperature": round(random.uniform(20, 35), 2),
+            "timestamp": time.time()
+        }
+        client.publish(TOPIC, json.dumps(payload))
+        print(f"Moisture: {payload['moisture']}%")
         
-        print(f"📡 Published: {json_payload}")
-        
-        # Wait 5 seconds before next reading
-        time.sleep(5)
+        time.sleep(2) # Faster speed for testing
 
 except KeyboardInterrupt:
-    print("\nSimulated Sensor Stopped.")
     client.loop_stop()
     client.disconnect()
